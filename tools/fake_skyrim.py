@@ -4,18 +4,25 @@ Creates the shared mapping, streams a flat floor + a staircase of collision, hol
 bit, prints Minecraft's reported player state, and saves the overlay frame to a PNG.
 
     python tools/fake_skyrim.py [seconds] [out.png]
+
+On Linux it plays a Skyrim running in Proton: the mapping is the file /dev/shm/SkyCraft_v1 (or
+SKYCRAFT_LINK_FILE), and it answers the native Minecraft's clock-sync requests.
 """
 
 import mmap
 import os
 import struct
 import sys
+import threading
 import time
 import zlib
 
 MAGIC = 0x43594B53
-VERSION = 11
+VERSION = 12
 NAME = os.environ.get("SKYCRAFT_LINK", "Local\\SkyCraft_v1")  # fake_guest.py runs one beside a real Skyrim
+WINDOWS = os.name == "nt"
+LINK_FILE = os.environ.get("SKYCRAFT_LINK_FILE", "/dev/shm/" + NAME.rsplit("\\", 1)[-1])
+OFF_CLOCK = 0x40
 OFF_SKY = 0x100
 OFF_MC = 0x200
 OFF_OVL = 0x300
@@ -39,17 +46,34 @@ X0 = 100000    # test area origin (blocks); must be a multiple of 8
 
 
 def tick():
+    """Milliseconds on our own clock (heartbeats: the other side only watches them change)."""
+    if not WINDOWS:
+        return time.monotonic_ns() // 1_000_000
     import ctypes
 
+    ctypes.windll.kernel32.GetTickCount64.restype = ctypes.c_uint64
     return ctypes.windll.kernel32.GetTickCount64()
+
+
+def qpc():
+    """Stand-in for Skyrim's QueryPerformanceCounter: on Linux, a clock unrelated to Java's."""
+    return time.perf_counter_ns() // 100 + 123_456_789_000  # 10 MHz like Wine, with an offset
+
+
+def open_mapping():
+    if WINDOWS:
+        return mmap.mmap(-1, SIZE, tagname=NAME)
+    fd = os.open(LINK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.ftruncate(fd, SIZE)
+        return mmap.mmap(fd, SIZE)
+    finally:
+        os.close(fd)
 
 
 class Link:
     def __init__(self):
-        import ctypes
-
-        ctypes.windll.kernel32.GetTickCount64.restype = ctypes.c_uint64
-        self.m = mmap.mmap(-1, SIZE, tagname=NAME)
+        self.m = open_mapping()
         self.m[0:0x100] = bytes(0x100)
         self.m[OFF_SKY:OFF_SKY + 0x40] = bytes(0x40)
         self.m[OFF_OVL:OFF_OVL + 0x100] = bytes(0x100)
@@ -60,6 +84,10 @@ class Link:
         self.m[OFF_ENTITIES:OFF_ENTITIES + 0x40] = bytes(0x40)
         self.m[OFF_RENDER:OFF_RENDER + 0x80] = bytes(0x80)
         struct.pack_into("<IIII", self.m, 0, MAGIC, VERSION, os.getpid(), 0)
+        struct.pack_into("<IIqq", self.m, OFF_CLOCK, 0, 0, 0, 10_000_000)
+        self.beat_seen = 0
+        self.beat_changed = 0
+        threading.Thread(target=self.answer_clock_sync, daemon=True).start()
         self.front = 2
         self.sky_seq = 0
         self.col_head = 0
@@ -125,9 +153,22 @@ class Link:
         self.actor_seq += 1
         struct.pack_into("<I", self.m, OFF_ACTORS, self.actor_seq * 2)
 
+    def answer_clock_sync(self):
+        answered = 0
+        while True:
+            (request,) = struct.unpack_from("<I", self.m, OFF_CLOCK)
+            if request != answered:
+                struct.pack_into("<q", self.m, OFF_CLOCK + 8, qpc())
+                struct.pack_into("<I", self.m, OFF_CLOCK + 4, request)
+                answered = request
+            time.sleep(0.001)
+
     def mc_alive(self):
         (beat,) = struct.unpack_from("<Q", self.m, 0x18)
-        return beat != 0 and tick() - beat < 3000
+        now = tick()
+        if beat != self.beat_seen:
+            self.beat_seen, self.beat_changed = beat, now
+        return beat != 0 and now - self.beat_changed < 3000
 
     def write_sky(self, flags, pos, yaw, pitch, teleport_seq, epoch):
         self.sky_seq += 1

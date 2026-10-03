@@ -7,9 +7,14 @@ import dev.skycraft.SkyCraft;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.net.UnixDomainSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.concurrent.locks.LockSupport;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import net.minecraft.client.Minecraft;
@@ -22,7 +27,8 @@ import org.jspecify.annotations.Nullable;
  * world), and while hosting it carries a Join button. A friend with SkyCraft running who clicks it
  * gets the host's e4mc link here, and joins exactly as with /join.
  *
- * <p>Talks to the Discord app on this PC over its local IPC pipe (\\.\pipe\discord-ipc-N) from one
+ * <p>Talks to the Discord app on this PC over its local IPC pipe (\\.\pipe\discord-ipc-N; on Linux and
+ * macOS the Unix socket $XDG_RUNTIME_DIR/discord-ipc-N) from one
  * background thread: frames are sent and, only when some have arrived, read, so a read never blocks
  * a write on the same pipe. Without Discord running it quietly retries now and then.
  */
@@ -132,8 +138,7 @@ public final class DiscordPresence {
 
 	// ---- the IPC thread --------------------------------------------------------------------------
 
-	private static @Nullable RandomAccessFile pipe;
-	private static @Nullable FileInputStream in;
+	private static @Nullable Ipc pipe;
 	private static @Nullable String sentActivity;
 	private static long lastSent;
 	private static boolean loggedNoDiscord;
@@ -170,12 +175,10 @@ public final class DiscordPresence {
 
 	private static boolean connect() throws IOException, InterruptedException {
 		for (int i = 0; i < 10; i++) {
-			try {
-				pipe = new RandomAccessFile("\\\\.\\pipe\\discord-ipc-" + i, "rw");
-			} catch (IOException e) {
+			pipe = Ipc.open(i);
+			if (pipe == null) {
 				continue;
 			}
-			in = new FileInputStream(pipe.getFD());
 			JsonObject hello = new JsonObject();
 			hello.addProperty("v", 1);
 			hello.addProperty("client_id", APP_ID);
@@ -242,7 +245,7 @@ public final class DiscordPresence {
 
 	/** The next frame if one has fully arrived (never blocks for one that hasn't started). */
 	private static @Nullable JsonObject readFrame() throws IOException {
-		while (in.available() >= 8) {
+		while (pipe.available() >= 8) {
 			byte[] header = new byte[8];
 			pipe.readFully(header);
 			ByteBuffer h = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN);
@@ -280,7 +283,134 @@ public final class DiscordPresence {
 		} catch (IOException ignored) {
 		}
 		pipe = null;
-		in = null;
 		sentActivity = null;
+	}
+
+	/** Discord's local IPC: a named pipe on Windows, a Unix socket elsewhere. */
+	private interface Ipc {
+		void write(byte[] bytes) throws IOException;
+
+		/** Bytes that can be read without waiting. */
+		int available() throws IOException;
+
+		void readFully(byte[] bytes) throws IOException;
+
+		void close() throws IOException;
+
+		static @Nullable Ipc open(int index) {
+			try {
+				return System.getProperty("os.name", "").startsWith("Windows")
+					? new PipeIpc(new RandomAccessFile("\\\\.\\pipe\\discord-ipc-" + index, "rw"))
+					: SocketIpc.open(index);
+			} catch (IOException e) {
+				return null;
+			}
+		}
+	}
+
+	private record PipeIpc(RandomAccessFile file, FileInputStream in) implements Ipc {
+		PipeIpc(RandomAccessFile file) throws IOException {
+			this(file, new FileInputStream(file.getFD()));
+		}
+
+		@Override
+		public void write(byte[] bytes) throws IOException {
+			this.file.write(bytes);
+		}
+
+		@Override
+		public int available() throws IOException {
+			return this.in.available();
+		}
+
+		@Override
+		public void readFully(byte[] bytes) throws IOException {
+			this.file.readFully(bytes);
+		}
+
+		@Override
+		public void close() throws IOException {
+			this.file.close();
+		}
+	}
+
+	private static final class SocketIpc implements Ipc {
+		private final SocketChannel channel;
+		private ByteBuffer buffered = ByteBuffer.allocate(0);
+
+		private SocketIpc(SocketChannel channel) {
+			this.channel = channel;
+		}
+
+		/** Where Discord (native, Flatpak or Snap) puts its socket. */
+		static @Nullable SocketIpc open(int index) throws IOException {
+			String name = "discord-ipc-" + index;
+			for (String env : new String[] { "XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP" }) {
+				String dir = System.getenv(env);
+				if (dir == null || dir.isEmpty()) {
+					continue;
+				}
+				for (String sub : new String[] { "", "app/com.discordapp.Discord", "snap.discord" }) {
+					Path socket = Path.of(dir, sub, name);
+					if (Files.exists(socket)) {
+						SocketChannel channel = SocketChannel.open(UnixDomainSocketAddress.of(socket));
+						channel.configureBlocking(false);
+						return new SocketIpc(channel);
+					}
+				}
+			}
+			Path socket = Path.of("/tmp", name);
+			if (!Files.exists(socket)) {
+				return null;
+			}
+			SocketChannel channel = SocketChannel.open(UnixDomainSocketAddress.of(socket));
+			channel.configureBlocking(false);
+			return new SocketIpc(channel);
+		}
+
+		@Override
+		public void write(byte[] bytes) throws IOException {
+			ByteBuffer out = ByteBuffer.wrap(bytes);
+			while (out.hasRemaining()) {
+				if (this.channel.write(out) == 0) {
+					Thread.onSpinWait();
+				}
+			}
+		}
+
+		@Override
+		public int available() throws IOException {
+			ByteBuffer chunk = ByteBuffer.allocate(4096);
+			int read = this.channel.read(chunk);
+			if (read < 0) {
+				throw new IOException("Discord closed the socket");
+			}
+			if (read > 0) {
+				chunk.flip();
+				ByteBuffer joined = ByteBuffer.allocate(this.buffered.remaining() + chunk.remaining());
+				joined.put(this.buffered).put(chunk).flip();
+				this.buffered = joined;
+			}
+			return this.buffered.remaining();
+		}
+
+		@Override
+		public void readFully(byte[] bytes) throws IOException {
+			long deadline = System.currentTimeMillis() + 5_000;
+			while (this.buffered.remaining() < bytes.length) {
+				if (System.currentTimeMillis() > deadline) {
+					throw new IOException("Discord stopped mid-message");
+				}
+				if (this.available() < bytes.length) {
+					LockSupport.parkNanos(1_000_000L);
+				}
+			}
+			this.buffered.get(bytes);
+		}
+
+		@Override
+		public void close() throws IOException {
+			this.channel.close();
+		}
 	}
 }

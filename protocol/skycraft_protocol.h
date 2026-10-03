@@ -13,14 +13,18 @@
 namespace skycraft::proto
 {
 	inline constexpr std::uint32_t kMagic = 0x43594B53;  // "SKYC"
-	inline constexpr std::uint32_t kVersion = 11;
+	inline constexpr std::uint32_t kVersion = 12;
 	inline constexpr wchar_t       kMappingName[] = L"Local\\SkyCraft_v1";
+	// Under Wine/Proton the mapping is backed by this file, so a native Linux Minecraft can map the
+	// same memory (/dev/shm/SkyCraft_v1). A Minecraft inside Wine still opens it by kMappingName.
+	inline constexpr wchar_t       kWineMappingFile[] = L"Z:\\dev\\shm\\SkyCraft_v1";
 
 	// 1 Minecraft block == 70 Skyrim units (Skyrim player ~128 units tall, MC player 1.8 blocks).
 	inline constexpr double kUnitsPerBlock = 70.0;
 
 	// ---- region offsets ---------------------------------------------------------------------
 	inline constexpr std::uint64_t kOffHeader = 0x0;
+	inline constexpr std::uint64_t kOffClockSync = 0x40;
 	inline constexpr std::uint64_t kOffSkyState = 0x100;
 	inline constexpr std::uint64_t kOffMcState = 0x200;
 	inline constexpr std::uint64_t kOffOverlayCtl = 0x300;
@@ -48,10 +52,25 @@ namespace skycraft::proto
 		std::uint32_t version;
 		std::uint32_t skyrimPid;
 		std::uint32_t mcPid;
-		std::uint64_t skyrimHeartbeatMs;  // GetTickCount64() at last Skyrim frame
-		std::uint64_t mcHeartbeatMs;      // GetTickCount64() at last MC frame
+		// Each side's own millisecond clock at its last frame. The two clocks aren't comparable (a
+		// native Linux Minecraft doesn't share Windows' clock): readers only check it keeps changing.
+		std::uint64_t skyrimHeartbeatMs;
+		std::uint64_t mcHeartbeatMs;
 	};
 	static_assert(sizeof(Header) == 0x20);
+
+	// ---- clock sync @0x40 -------------------------------------------------------------------
+	// McState::tickQpc is on Skyrim's QueryPerformanceCounter clock. A Minecraft that can't read
+	// that clock (native Linux, beside a Skyrim in Proton) asks for it: it bumps request, Skyrim
+	// stores its QPC and then sets reply = request. Round trips give Minecraft the offset.
+	struct ClockSync
+	{
+		std::uint32_t request;  // written by MC
+		std::uint32_t reply;    // written by Skyrim, after qpc
+		std::int64_t  qpc;      // Skyrim's QueryPerformanceCounter when it answered
+		std::int64_t  qpcFrequency;
+	};
+	static_assert(kOffClockSync + sizeof(ClockSync) <= kOffSkyState);
 
 	// ---- Skyrim -> MC state @0x100 (seqlock: seq odd while writing) -------------------------
 	enum SkyFlags : std::uint32_t
