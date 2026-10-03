@@ -8,13 +8,14 @@ public final class Proto {
 	}
 
 	public static final int MAGIC = 0x43594B53;
-	public static final int VERSION = 11;
+	public static final int VERSION = 12;
 	// A second client on the same PC (multiplayer testing) talks to its own stand-in Skyrim:
 	// -Dskycraft.link=Local\SkyCraft_guest (see tools/fake_guest.py).
 	public static final String MAPPING_NAME = System.getProperty("skycraft.link", "Local\\SkyCraft_v1");
 	public static final double UNITS_PER_BLOCK = 70.0;
 
 	public static final long OFF_HEADER = 0x0;
+	public static final long OFF_CLOCK_SYNC = 0x40;
 	public static final long OFF_SKY_STATE = 0x100;
 	public static final long OFF_MC_STATE = 0x200;
 	public static final long OFF_WATER_GRID = 0x400;
@@ -129,6 +130,12 @@ public final class Proto {
 	public static final long H_MC_PID = 0x0C;
 	public static final long H_SKYRIM_HEARTBEAT = 0x10;
 	public static final long H_MC_HEARTBEAT = 0x18;
+
+	// ClockSync (relative to OFF_CLOCK_SYNC)
+	public static final long CS_REQUEST = 0x00;
+	public static final long CS_REPLY = 0x04;
+	public static final long CS_QPC = 0x08;
+	public static final long CS_QPC_FREQUENCY = 0x10;
 
 	// SkyState (relative to OFF_SKY_STATE)
 	public static final long SS_SEQ = 0x00;

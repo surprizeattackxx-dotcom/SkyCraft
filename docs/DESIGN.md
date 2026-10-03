@@ -179,7 +179,7 @@ Skyrim renders the world. MC renders **only its own stuff** offscreen at Skyrim'
 
 ## 10. Protocol / IPC
 
-- **Shared memory** `Local\SkyCraft_v1` holds:
+- **Shared memory** `Local\SkyCraft_v1` holds (under Wine/Proton it is backed by `/dev/shm/SkyCraft_v1`, so a native Linux Minecraft maps the same memory; a clock-sync slot gives it Skyrim's QPC clock):
   - a **header**: magic, protocol version, both PIDs, heartbeats
   - **latest-value slots** under a seqlock, for per-frame data: `PlayerState`, `CameraState`, `FrameSync`
   - **two SPSC ring buffers** (Skyrim→MC and MC→Skyrim) for events

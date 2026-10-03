@@ -169,13 +169,15 @@ public final class SkyClient {
 			return;
 		}
 		nextSkyrimCheck = now + 1000;
-		if (ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false)) {
+		// Off Windows the pid is Skyrim's Wine process id, which ProcessHandle can't see: its heartbeat says.
+		boolean skyrimRunning = SkyLink.WINDOWS ? ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false) : SkyLink.active();
+		if (skyrimRunning) {
 			skyrimGoneSince = 0;
 			return;
 		}
 		if (skyrimGoneSince == 0) {
 			skyrimGoneSince = now;
-		} else if (now - skyrimGoneSince > 5000) {
+		} else if (now - skyrimGoneSince > (SkyLink.WINDOWS ? 5000 : 60000)) {  // a silent heartbeat may be a long load
 			SkyCraft.LOG.info("SkyCraft: Skyrim (pid {}) has closed; saving and quitting", pid);
 			minecraft.stop();
 		}

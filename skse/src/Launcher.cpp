@@ -212,6 +212,7 @@ namespace skycraft::Launcher
 	Status GetStatus() { return status.load(); }
 
 	// A Minecraft with the SkyCraft mod holds this mutex while it runs (SkyLink.announceRunning).
+	// A native Linux Minecraft can't make Windows mutexes: it holds a lock on a /dev/shm file instead.
 	bool MinecraftRunning()
 	{
 		HANDLE mutex = ::OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\SkyCraft_v1_minecraft");
@@ -219,7 +220,21 @@ namespace skycraft::Launcher
 			::CloseHandle(mutex);
 			return true;
 		}
-		return false;
+		if (!RunningUnderWine()) {
+			return false;
+		}
+		HANDLE file = ::CreateFileW(L"Z:\\dev\\shm\\SkyCraft_v1_minecraft", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+			nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (file == INVALID_HANDLE_VALUE) {
+			return false;
+		}
+		OVERLAPPED at{};
+		const bool unlocked = ::LockFileEx(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &at);
+		if (unlocked) {
+			::UnlockFileEx(file, 0, 1, 0, &at);
+		}
+		::CloseHandle(file);
+		return !unlocked;
 	}
 
 	bool PrismRunning()

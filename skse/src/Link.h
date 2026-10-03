@@ -5,6 +5,9 @@
 namespace skycraft
 {
 
+	// Skyrim is running in Wine/Proton (Linux or macOS), not on Windows.
+	bool RunningUnderWine();
+
 	// Owner of the shared-memory mapping (Skyrim creates it; Minecraft opens it).
 	class Link
 	{
@@ -54,7 +57,13 @@ namespace skycraft
 		template <class T>
 		T* At(std::uint64_t a_off) const { return reinterpret_cast<T*>(base_ + a_off); }
 
+		// Background thread: answers Minecraft's clock-sync requests (proto::ClockSync).
+		void AnswerClockSync();
+
 		HANDLE        mapping_{ nullptr };
+		// McAlive: the last heartbeat value seen and when (our GetTickCount64) it last changed.
+		mutable std::atomic<std::uint64_t> mcBeatSeen_{ 0 };
+		mutable std::atomic<std::uint64_t> mcBeatChangedAt_{ 0 };
 		std::uint8_t* base_{ nullptr };
 		std::uint32_t overlayFront_{ 2 };
 	};

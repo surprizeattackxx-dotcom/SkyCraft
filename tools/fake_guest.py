@@ -31,7 +31,11 @@ class HostLink:
     """Read-only view of the host's link: its player, and its Skyrim's collision messages."""
 
     def __init__(self):
-        self.m = mmap.mmap(-1, fs.OFF_COL + fs.COL_BYTES, tagname="Local\\SkyCraft_v1")
+        if fs.WINDOWS:
+            self.m = mmap.mmap(-1, fs.OFF_COL + fs.COL_BYTES, tagname="Local\\SkyCraft_v1")
+        else:
+            with open("/dev/shm/SkyCraft_v1", "r+b") as f:
+                self.m = mmap.mmap(f.fileno(), fs.OFF_COL + fs.COL_BYTES)
         self.read_at = self.col_head()  # only what the host's Skyrim sends from now on
 
     def player(self):

@@ -108,6 +108,21 @@ JVM arguments if it should stay hidden from the start. SkyCraft never starts a s
 one with the mod is already running. It starts Minecraft through Windows' shell, so under Mod
 Organizer Minecraft stays outside MO2's virtual file system and doesn't keep MO2 locked.
 
+### Linux (Steam Proton)
+
+Skyrim runs in Proton as usual, with SKSE. Minecraft can run either way:
+
+- **Native Linux Minecraft.** Set `bStartWithSkyrim = 0` and start your own
+  Linux Prism/MultiMC instance (same requirements as above). Under Proton, SkyCraft's shared memory
+  is the file `/dev/shm/SkyCraft_v1`, which the native Minecraft maps directly. The two games'
+  clocks are synced automatically. Discord Rich Presence uses Discord's Linux socket.
+- **Minecraft inside Proton.** Leave `bStartWithSkyrim = 1`, and SkyCraft starts its bundled
+  (Windows) Prism inside Skyrim's Proton prefix, the same as on Windows.
+
+If a native Minecraft is already running, SkyCraft won't start a second one in Proton. Linux
+support is new: if Minecraft never connects, check that `/dev/shm/SkyCraft_v1` exists while
+Skyrim runs (both games must see the same `/dev/shm`, which sandboxed setups can hide).
+
 ## Playing with friends
 
 Everyone needs their own Skyrim with SkyCraft. Only the Minecraft world is shared: blocks, items,

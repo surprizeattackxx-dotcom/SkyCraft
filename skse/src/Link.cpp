@@ -73,10 +73,25 @@ namespace skycraft
 		if (Elevated()) {
 			logger::info("Skyrim is running as administrator");
 		}
+		// Under Wine, back the mapping with a file in /dev/shm so a native Linux Minecraft can map
+		// it too. Windows keeps the plain page-file mapping.
+		HANDLE backing = INVALID_HANDLE_VALUE;
+		if (RunningUnderWine()) {
+			backing = ::CreateFileW(proto::kWineMappingFile, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+				nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+			if (backing == INVALID_HANDLE_VALUE) {
+				logger::warn("Wine: couldn't open /dev/shm/SkyCraft_v1 ({}); only a Minecraft inside Wine can connect", ::GetLastError());
+			} else {
+				logger::info("Wine: shared memory is /dev/shm/SkyCraft_v1 (a native Linux Minecraft can connect)");
+			}
+		}
 		SECURITY_ATTRIBUTES access{ sizeof(access), SharedWithThisUser(), FALSE };
-		mapping_ = ::CreateFileMappingW(INVALID_HANDLE_VALUE, access.lpSecurityDescriptor ? &access : nullptr, PAGE_READWRITE,
+		mapping_ = ::CreateFileMappingW(backing, access.lpSecurityDescriptor ? &access : nullptr, PAGE_READWRITE,
 			static_cast<DWORD>(size >> 32), static_cast<DWORD>(size & 0xFFFFFFFF), proto::kMappingName);
 		const DWORD created = ::GetLastError();
+		if (backing != INVALID_HANDLE_VALUE) {
+			::CloseHandle(backing);  // the mapping keeps the file open
+		}
 		if (access.lpSecurityDescriptor) {
 			::LocalFree(access.lpSecurityDescriptor);
 		}
@@ -104,13 +119,45 @@ namespace skycraft
 		std::memset(base_ + proto::kOffEventRing, 0, proto::kEventRingDataOff);
 		std::memset(base_ + proto::kOffWorldEntities, 0, sizeof(proto::WorldEntities));
 		std::memset(base_ + proto::kOffRenderRing, 0, proto::kRenRingDataOff);
+		std::memset(base_ + proto::kOffClockSync, 0, sizeof(proto::ClockSync));
 		header->version = proto::kVersion;
 		header->skyrimPid = ::GetCurrentProcessId();
 		header->skyrimHeartbeatMs = ::GetTickCount64();
+		header->mcHeartbeatMs = 0;  // a Minecraft still attached will write it again
 		Atomic(header->magic).store(proto::kMagic, std::memory_order_release);
 
 		logger::info("shared memory {} ({} MB, {})", "Local\\SkyCraft_v1", size >> 20, existed ? "reused" : "created");
+		std::thread(&Link::AnswerClockSync, this).detach();
 		return true;
+	}
+
+	bool RunningUnderWine()
+	{
+		static const bool wine = [] {
+			const HMODULE ntdll = ::GetModuleHandleW(L"ntdll.dll");
+			return ntdll && ::GetProcAddress(ntdll, "wine_get_version") != nullptr;
+		}();
+		return wine;
+	}
+
+	void Link::AnswerClockSync()
+	{
+		auto*         sync = At<proto::ClockSync>(proto::kOffClockSync);
+		LARGE_INTEGER freq;
+		::QueryPerformanceFrequency(&freq);
+		Atomic(sync->qpcFrequency).store(freq.QuadPart, std::memory_order_relaxed);
+		std::uint32_t answered = 0;
+		for (;;) {
+			const auto request = Atomic(sync->request).load(std::memory_order_acquire);
+			if (request != answered) {
+				LARGE_INTEGER now;
+				::QueryPerformanceCounter(&now);
+				Atomic(sync->qpc).store(now.QuadPart, std::memory_order_relaxed);
+				Atomic(sync->reply).store(request, std::memory_order_release);
+				answered = request;
+			}
+			::Sleep(1);
+		}
 	}
 
 	bool Link::McAlive() const
@@ -118,9 +165,15 @@ namespace skycraft
 		if (!base_) {
 			return false;
 		}
-		auto& beat = At<proto::Header>(proto::kOffHeader)->mcHeartbeatMs;
+		// Minecraft's heartbeat is on its own clock: alive while the value keeps changing.
+		auto&      beat = At<proto::Header>(proto::kOffHeader)->mcHeartbeatMs;
 		const auto last = Atomic(beat).load(std::memory_order_acquire);
-		return last != 0 && ::GetTickCount64() - last < kMcTimeoutMs;
+		const auto now = ::GetTickCount64();
+		if (last != mcBeatSeen_.load(std::memory_order_relaxed)) {
+			mcBeatSeen_.store(last, std::memory_order_relaxed);
+			mcBeatChangedAt_.store(now, std::memory_order_relaxed);
+		}
+		return last != 0 && now - mcBeatChangedAt_.load(std::memory_order_relaxed) < kMcTimeoutMs;
 	}
 
 	std::uint32_t Link::McPid() const
